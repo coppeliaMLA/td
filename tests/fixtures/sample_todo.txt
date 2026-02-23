@@ -1,0 +1,10 @@
+(A) 2024-01-15 Call mom +family @phone
+(B) Review quarterly report +work @office
+Buy groceries +personal @errands
+x 2024-01-14 2024-01-10 Fix bug in login page +work @dev
+(A) Prepare presentation +work @today
+Schedule dentist appointment +health @phone @tomorrow
+(C) Clean garage +home @thisweek
+Read chapter 5 +learning @nextweek
+Plan vacation +personal @thismonth
+Update resume +career @nextmonth
