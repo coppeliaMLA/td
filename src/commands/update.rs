@@ -1,7 +1,8 @@
 use crate::output::Printer;
 use crate::task::Task;
 use crate::time_context::{
-    apply_transitions, get_transitions_for_date, set_time_context, today, TimeContext,
+    apply_transitions, get_transitions_for_date, set_time_context, time_context_for_due, today,
+    TimeContext,
 };
 use crate::todo_file::TodoFile;
 use anyhow::{bail, Result};
@@ -66,7 +67,16 @@ pub fn time_update(path: &Path, printer: &Printer) -> Result<()> {
 
     for task in &mut todo.tasks {
         let old_desc = task.to_string();
-        let new_desc = apply_transitions(&old_desc, &transitions);
+
+        // A dated, open task derives its time context straight from its due
+        // date; everything else follows the relative day-based transitions.
+        let new_desc = match (task.is_completed, task.due()) {
+            (false, Some(due)) => match time_context_for_due(due, current_date) {
+                Some(ctx) => set_time_context(&old_desc, ctx),
+                None => old_desc.clone(), // too far out to bucket; leave as-is
+            },
+            _ => apply_transitions(&old_desc, &transitions),
+        };
 
         if old_desc != new_desc {
             *task = Task::parse(task.id, &new_desc);

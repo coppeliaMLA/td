@@ -8,6 +8,7 @@ A command-line tool for managing todo.txt files with automatic time context mana
 - **Batch Operations**: Apply operations to multiple tasks by ID
 - **Smart Filtering**: Filter by projects (`+project`), contexts (`@context`), and priorities (`A-B`)
 - **Time Contexts**: Automatic management of time-based contexts (`@today`, `@tomorrow`, `@thisweek`, etc.)
+- **Recurring Tasks**: Tasks tagged with `rec:` and `due:` auto-create their next occurrence on completion
 
 ## Installation
 
@@ -47,6 +48,31 @@ Mark tasks as done by their line numbers:
 ```bash
 td done 23 45 12
 ```
+
+### Recurring Tasks
+
+A task that carries a `rec:` tag automatically spawns its next occurrence when
+you mark it done. Recurrence is anchored on a `due:` date, so a recurring task
+needs both tags:
+
+```bash
+td add "Pay rent due:2026-07-01 rec:+1m"
+td add "Water plants due:2026-06-26 rec:3d"
+```
+
+The `rec:` spec is `<count><unit>`, where unit is one of `d` (days), `w`
+(weeks), `m` (months), `y` (years):
+
+- `rec:3d` — **non-strict**: the next due date is offset from the day you
+  completed the task. Good for "do it again N days after I last did it".
+- `rec:+1m` — **strict** (leading `+`): the next due date is offset from the
+  task's *old due date*, so it never drifts. Good for fixed schedules like rent
+  on the 1st.
+
+When you complete a recurring task, the original is marked done and a fresh,
+open copy is created with the due date advanced and the creation date set to
+today. If a task has a `rec:` tag but no `due:` date, it is completed normally
+and a warning is printed (no occurrence can be created).
 
 ### Deleting Tasks
 
@@ -151,7 +177,32 @@ Run the update command to process automatic time context transitions:
 td time-update
 ```
 
-The transitions follow these rules:
+`time-update` handles two kinds of task differently:
+
+**Tasks with a `due:` date** get their time context computed directly from the
+due date (any existing time context is replaced). The nearest enclosing bucket
+wins:
+
+| Due date is… | Context |
+|--------------|---------|
+| today or overdue | `@today` |
+| tomorrow | `@tomorrow` |
+| later this calendar week | `@thisweek` |
+| next calendar week | `@nextweek` |
+| later this calendar month | `@thismonth` |
+| next calendar month | `@nextmonth` |
+| later this calendar quarter | `@thisquarter` |
+| next calendar quarter | `@nextquarter` |
+| beyond next quarter | *(left unchanged)* |
+
+```bash
+td add "File VAT return due:2026-07-31"
+td time-update    # tags it @thismonth / @thisweek / @today as the date approaches
+```
+
+Calendar weeks run Monday–Sunday.
+
+**Tasks without a `due:` date** follow the relative day-based transitions:
 
 - **Daily (each morning)**: `@tomorrow` → `@today`
 - **Friday morning**: `@thisweek` → `@today`
@@ -231,6 +282,7 @@ x 2024-01-14 2024-01-10 Completed task +project @context
 - **Creation date**: `YYYY-MM-DD` after priority
 - **Projects**: Prefixed with `+` (e.g., `+work`)
 - **Contexts**: Prefixed with `@` (e.g., `@home`)
+- **Key/value tags**: `key:value` (e.g., `due:2026-07-01`, `rec:+1m`)
 - **Completion**: Line starts with `x ` followed by completion date
 
 ## Dependencies
