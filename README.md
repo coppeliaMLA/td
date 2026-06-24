@@ -70,9 +70,13 @@ The `rec:` spec is `<count><unit>`, where unit is one of `d` (days), `w`
   on the 1st.
 
 When you complete a recurring task, the original is marked done and a fresh,
-open copy is created with the due date advanced and the creation date set to
-today. If a task has a `rec:` tag but no `due:` date, it is completed normally
-and a warning is printed (no occurrence can be created).
+open copy is created with the due date advanced (the original creation date, if
+any, is carried over unchanged).
+
+Each tag must be a single token, so write `rec:+1m`, not `rec: +1m`. If a
+recurrence can't be created — a `rec:` tag with no `due:` date, an unrecognized
+spec, or a stray space that leaves a bare `rec:` — the task is completed
+normally and a warning explains why.
 
 ### Deleting Tasks
 

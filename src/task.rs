@@ -15,6 +15,9 @@ lazy_static! {
     static ref DUE_RE: Regex = Regex::new(r"\bdue:\S+").unwrap();
     // a recurrence spec: optional `+` (strict) then a count and a unit
     static ref REC_RE: Regex = Regex::new(r"^(\+?)(\d+)([dwmy])$").unwrap();
+    // a `rec:` marker token, whether or not it has a valid value attached;
+    // catches `rec: +1m` (stray space) where no `rec` tag actually parses
+    static ref REC_MARKER_RE: Regex = Regex::new(r"(?:^|\s)rec:").unwrap();
 }
 
 /// Extract all `key:value` tags from a piece of text, preserving order.
@@ -167,6 +170,12 @@ impl Task {
         self.tag("rec")
     }
 
+    /// True if the text contains a `rec:` marker, even one that didn't parse as
+    /// a tag — e.g. `rec: +1m`, where a stray space leaves an empty value.
+    pub fn has_recurrence_marker(&self) -> bool {
+        REC_MARKER_RE.is_match(&self.description)
+    }
+
     /// Build the next occurrence of a recurring task, to be created when this
     /// one is completed.
     ///
@@ -190,9 +199,11 @@ impl Task {
             .replace(&self.description, format!("due:{}", next_due.format("%Y-%m-%d")))
             .to_string();
 
+        // Carry over the original creation date (if any) rather than stamping
+        // the completion date onto the new occurrence.
         let mut next = Task::new(&new_desc);
         next.priority = self.priority;
-        next.creation_date = Some(today);
+        next.creation_date = self.creation_date;
         Some(next)
     }
 
@@ -293,9 +304,10 @@ mod tests {
         let task = Task::parse(1, "(A) Pay rent due:2020-01-15 rec:+1m");
         let next = task.next_occurrence(ymd(2020, 1, 20)).unwrap();
         assert_eq!(next.due(), Some(ymd(2020, 2, 15)));
-        assert_eq!(next.creation_date, Some(ymd(2020, 1, 20)));
         assert_eq!(next.priority, Some('A'));
         assert!(!next.is_completed);
+        // no creation date was on the original, so none is added
+        assert_eq!(next.creation_date, None);
     }
 
     #[test]
@@ -304,7 +316,24 @@ mod tests {
         let task = Task::parse(1, "Water plants due:2020-01-15 rec:3d");
         let next = task.next_occurrence(ymd(2020, 1, 20)).unwrap();
         assert_eq!(next.due(), Some(ymd(2020, 1, 23)));
-        assert_eq!(next.creation_date, Some(ymd(2020, 1, 20)));
+    }
+
+    #[test]
+    fn test_next_occurrence_carries_creation_date() {
+        // an existing creation date is preserved, not replaced by completion date
+        let task = Task::parse(1, "2020-01-01 Water plants due:2020-01-15 rec:+3d");
+        let next = task.next_occurrence(ymd(2020, 1, 20)).unwrap();
+        assert_eq!(next.creation_date, Some(ymd(2020, 1, 1)));
+    }
+
+    #[test]
+    fn test_has_recurrence_marker() {
+        // stray space: no rec tag parses, but the marker is still detectable
+        let task = Task::parse(1, "Pay rent due:2020-01-15 rec: +1m");
+        assert!(task.recurrence().is_none());
+        assert!(task.has_recurrence_marker());
+        // a clean task has no marker
+        assert!(!Task::parse(1, "Pay rent due:2020-01-15").has_recurrence_marker());
     }
 
     #[test]

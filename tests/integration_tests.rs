@@ -212,6 +212,40 @@ fn test_done_recurring_without_due_warns() {
 }
 
 #[test]
+fn test_done_recurring_malformed_rec_warns() {
+    let dir = tempdir().unwrap();
+    let todo_path = dir.path().join("todo.txt");
+    // stray space after rec: — a common mistake that silently parses no tag
+    fs::write(&todo_path, "Pay rent due:2026-06-24 rec: +1m\n").unwrap();
+
+    td().args(["-f", todo_path.to_str().unwrap(), "done", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("malformed rec: tag"));
+
+    let content = fs::read_to_string(&todo_path).unwrap();
+    // only the completed original, no new occurrence
+    assert_eq!(content.lines().filter(|l| !l.trim().is_empty()).count(), 1);
+}
+
+#[test]
+fn test_done_recurring_no_completion_date_prepended() {
+    let dir = tempdir().unwrap();
+    let todo_path = dir.path().join("todo.txt");
+    fs::write(&todo_path, "Pay rent due:2020-01-15 rec:+1m\n").unwrap();
+
+    td().args(["-f", todo_path.to_str().unwrap(), "done", "1"])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&todo_path).unwrap();
+    // the new occurrence should start with the description, not a date stamp
+    assert!(content
+        .lines()
+        .any(|l| l.starts_with("Pay rent") && l.contains("due:2020-02-15")));
+}
+
+#[test]
 fn test_delete_task() {
     let dir = tempdir().unwrap();
     let todo_path = dir.path().join("todo.txt");

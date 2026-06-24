@@ -10,7 +10,7 @@ pub fn done(path: &Path, ids: &[usize], printer: &Printer) -> Result<()> {
     let mut marked = Vec::new();
     let mut not_found = Vec::new();
     let mut new_tasks = Vec::new();
-    let mut rec_without_due = Vec::new();
+    let mut rec_warnings = Vec::new();
 
     for &id in ids {
         if let Some(task) = todo.get_task_mut(id) {
@@ -20,12 +20,25 @@ pub fn done(path: &Path, ids: &[usize], printer: &Printer) -> Result<()> {
                 task.mark_done();
                 marked.push(id);
 
-                // Spawn the next occurrence of a recurring task.
+                // Spawn the next occurrence of a recurring task, or explain why
+                // a recurrence-looking task didn't produce one.
                 if task.recurrence().is_some() {
                     match task.next_occurrence(today) {
                         Some(next) => new_tasks.push(next),
-                        None => rec_without_due.push(id),
+                        None if task.due().is_none() => rec_warnings.push(format!(
+                            "Task {} has a rec: tag but no due: date; no recurring task created",
+                            id
+                        )),
+                        None => rec_warnings.push(format!(
+                            "Task {} has an unrecognized rec: spec (use e.g. rec:1w or rec:+1m); no recurring task created",
+                            id
+                        )),
                     }
+                } else if task.has_recurrence_marker() {
+                    rec_warnings.push(format!(
+                        "Task {} has a malformed rec: tag (write rec:+1m, not rec: +1m); no recurring task created",
+                        id
+                    ));
                 }
             }
         } else {
@@ -59,11 +72,8 @@ pub fn done(path: &Path, ids: &[usize], printer: &Printer) -> Result<()> {
         printer.print_success(&format!("Created recurring task: {}", rendered));
     }
 
-    for id in &rec_without_due {
-        printer.print_warning(&format!(
-            "Task {} has a rec: tag but no due: date; no recurring task created",
-            id
-        ));
+    for warning in &rec_warnings {
+        printer.print_warning(warning);
     }
 
     Ok(())
