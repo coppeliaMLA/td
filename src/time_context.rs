@@ -1,4 +1,4 @@
-use chrono::{Datelike, Local, NaiveDate, Weekday};
+use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use regex::Regex;
 use lazy_static::lazy_static;
 
@@ -175,6 +175,69 @@ pub fn get_transitions_for_date(date: NaiveDate) -> Vec<(TimeContext, TimeContex
     transitions
 }
 
+/// Last day of the given month.
+fn last_day_of_month(year: i32, month: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, days_in_month(year, month)).unwrap()
+}
+
+/// Monday of the calendar week containing `date`.
+fn start_of_week(date: NaiveDate) -> NaiveDate {
+    let offset = date.weekday().num_days_from_monday() as i64;
+    date - Duration::days(offset)
+}
+
+/// Sunday of the calendar week containing `date`.
+fn end_of_week(date: NaiveDate) -> NaiveDate {
+    start_of_week(date) + Duration::days(6)
+}
+
+/// Last day of the calendar month containing `date`.
+fn end_of_month(date: NaiveDate) -> NaiveDate {
+    last_day_of_month(date.year(), date.month())
+}
+
+/// Last day of the calendar quarter containing `date`.
+fn end_of_quarter(date: NaiveDate) -> NaiveDate {
+    let end_month = ((date.month() - 1) / 3) * 3 + 3; // 3, 6, 9 or 12
+    last_day_of_month(date.year(), end_month)
+}
+
+/// Map a `due` date to the nearest enclosing time context, relative to `today`.
+///
+/// Buckets are checked nearest-first so the most specific one wins: a date that
+/// is both "this week" and "this month" resolves to `@thisweek`. Dates on or
+/// before `today` (i.e. overdue) collapse to `@today`. Returns None for dates
+/// beyond next quarter — too far away to bucket meaningfully.
+pub fn time_context_for_due(due: NaiveDate, today: NaiveDate) -> Option<TimeContext> {
+    if due <= today {
+        return Some(TimeContext::Today); // today or overdue
+    }
+    if due == today + Duration::days(1) {
+        return Some(TimeContext::Tomorrow);
+    }
+    if due <= end_of_week(today) {
+        return Some(TimeContext::ThisWeek);
+    }
+    if due <= end_of_week(today) + Duration::days(7) {
+        return Some(TimeContext::NextWeek);
+    }
+    if due <= end_of_month(today) {
+        return Some(TimeContext::ThisMonth);
+    }
+    let next_month = end_of_month(today).succ_opt()?; // first day of next month
+    if due <= end_of_month(next_month) {
+        return Some(TimeContext::NextMonth);
+    }
+    if due <= end_of_quarter(today) {
+        return Some(TimeContext::ThisQuarter);
+    }
+    let next_quarter = end_of_quarter(today).succ_opt()?; // first day of next quarter
+    if due <= end_of_quarter(next_quarter) {
+        return Some(TimeContext::NextQuarter);
+    }
+    None
+}
+
 /// Apply time context transitions to a task description
 pub fn apply_transitions(description: &str, transitions: &[(TimeContext, TimeContext)]) -> String {
     let mut result = description.to_string();
@@ -251,6 +314,27 @@ mod tests {
         assert!(is_first_month_of_quarter(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
         assert!(is_first_month_of_quarter(NaiveDate::from_ymd_opt(2024, 4, 15).unwrap()));
         assert!(!is_first_month_of_quarter(NaiveDate::from_ymd_opt(2024, 2, 15).unwrap()));
+    }
+
+    #[test]
+    fn test_time_context_for_due() {
+        // Monday 2024-01-15. Week: Mon 15 .. Sun 21. Month ends 01-31.
+        // Next month ends 2024-02-29. Quarter ends 03-31. Next quarter 06-30.
+        let today = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let ctx = |y, m, d| time_context_for_due(NaiveDate::from_ymd_opt(y, m, d).unwrap(), today);
+
+        assert_eq!(ctx(2024, 1, 10), Some(TimeContext::Today)); // overdue
+        assert_eq!(ctx(2024, 1, 15), Some(TimeContext::Today));
+        assert_eq!(ctx(2024, 1, 16), Some(TimeContext::Tomorrow));
+        assert_eq!(ctx(2024, 1, 19), Some(TimeContext::ThisWeek)); // Fri this week
+        assert_eq!(ctx(2024, 1, 21), Some(TimeContext::ThisWeek)); // Sun this week
+        assert_eq!(ctx(2024, 1, 22), Some(TimeContext::NextWeek)); // Mon next week
+        assert_eq!(ctx(2024, 1, 28), Some(TimeContext::NextWeek)); // Sun next week
+        assert_eq!(ctx(2024, 1, 30), Some(TimeContext::ThisMonth));
+        assert_eq!(ctx(2024, 2, 15), Some(TimeContext::NextMonth));
+        assert_eq!(ctx(2024, 3, 15), Some(TimeContext::ThisQuarter));
+        assert_eq!(ctx(2024, 5, 15), Some(TimeContext::NextQuarter));
+        assert_eq!(ctx(2024, 8, 15), None); // beyond next quarter
     }
 
     #[test]

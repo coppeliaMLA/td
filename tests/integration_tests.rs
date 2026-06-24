@@ -174,6 +174,78 @@ fn test_done_invalid_id() {
 }
 
 #[test]
+fn test_done_recurring_task() {
+    let dir = tempdir().unwrap();
+    let todo_path = dir.path().join("todo.txt");
+    // strict (+) recurrence gives a deterministic next due date
+    fs::write(&todo_path, "Pay rent due:2020-01-15 rec:+1m\n").unwrap();
+
+    td().args(["-f", todo_path.to_str().unwrap(), "done", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created recurring task"));
+
+    let content = fs::read_to_string(&todo_path).unwrap();
+    // original is completed
+    assert!(content.contains("x "));
+    // a fresh, open occurrence exists with the advanced due date
+    assert!(content.contains("due:2020-02-15"));
+    assert!(content.contains("rec:+1m"));
+    // the new occurrence is not marked complete
+    assert!(content.lines().any(|l| !l.starts_with("x ") && l.contains("due:2020-02-15")));
+}
+
+#[test]
+fn test_done_recurring_without_due_warns() {
+    let dir = tempdir().unwrap();
+    let todo_path = dir.path().join("todo.txt");
+    fs::write(&todo_path, "Standup rec:1d\n").unwrap();
+
+    td().args(["-f", todo_path.to_str().unwrap(), "done", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no due: date"));
+
+    let content = fs::read_to_string(&todo_path).unwrap();
+    // only the completed original, no new occurrence
+    assert_eq!(content.lines().filter(|l| !l.trim().is_empty()).count(), 1);
+}
+
+#[test]
+fn test_done_recurring_malformed_rec_warns() {
+    let dir = tempdir().unwrap();
+    let todo_path = dir.path().join("todo.txt");
+    // stray space after rec: — a common mistake that silently parses no tag
+    fs::write(&todo_path, "Pay rent due:2026-06-24 rec: +1m\n").unwrap();
+
+    td().args(["-f", todo_path.to_str().unwrap(), "done", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("malformed rec: tag"));
+
+    let content = fs::read_to_string(&todo_path).unwrap();
+    // only the completed original, no new occurrence
+    assert_eq!(content.lines().filter(|l| !l.trim().is_empty()).count(), 1);
+}
+
+#[test]
+fn test_done_recurring_no_completion_date_prepended() {
+    let dir = tempdir().unwrap();
+    let todo_path = dir.path().join("todo.txt");
+    fs::write(&todo_path, "Pay rent due:2020-01-15 rec:+1m\n").unwrap();
+
+    td().args(["-f", todo_path.to_str().unwrap(), "done", "1"])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&todo_path).unwrap();
+    // the new occurrence should start with the description, not a date stamp
+    assert!(content
+        .lines()
+        .any(|l| l.starts_with("Pay rent") && l.contains("due:2020-02-15")));
+}
+
+#[test]
 fn test_delete_task() {
     let dir = tempdir().unwrap();
     let todo_path = dir.path().join("todo.txt");
@@ -324,6 +396,54 @@ fn test_time_update_command() {
     td().args(["-f", todo_path.to_str().unwrap(), "time-update"])
         .assert()
         .success();
+}
+
+#[test]
+fn test_time_update_due_overdue_becomes_today() {
+    let dir = tempdir().unwrap();
+    let todo_path = dir.path().join("todo.txt");
+    // A due date far in the past is always overdue -> @today, regardless of run date.
+    fs::write(&todo_path, "Pay bill due:2000-01-01\n").unwrap();
+
+    td().args(["-f", todo_path.to_str().unwrap(), "time-update"])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&todo_path).unwrap();
+    assert!(content.contains("@today"));
+    assert!(content.contains("due:2000-01-01")); // due tag is preserved
+}
+
+#[test]
+fn test_time_update_due_replaces_existing_context() {
+    let dir = tempdir().unwrap();
+    let todo_path = dir.path().join("todo.txt");
+    // Stale @nextmonth should be overridden by the (overdue) due date.
+    fs::write(&todo_path, "Pay bill due:2000-01-01 @nextmonth\n").unwrap();
+
+    td().args(["-f", todo_path.to_str().unwrap(), "time-update"])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&todo_path).unwrap();
+    assert!(content.contains("@today"));
+    assert!(!content.contains("@nextmonth"));
+}
+
+#[test]
+fn test_time_update_far_future_due_unchanged() {
+    let dir = tempdir().unwrap();
+    let todo_path = dir.path().join("todo.txt");
+    // Far-future due date is beyond next quarter -> no time context applied.
+    fs::write(&todo_path, "Plan thing due:2999-12-31\n").unwrap();
+
+    td().args(["-f", todo_path.to_str().unwrap(), "time-update"])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&todo_path).unwrap();
+    assert!(!content.contains("@today"));
+    assert!(!content.contains("@tomorrow"));
 }
 
 #[test]

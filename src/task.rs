@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{Duration, Months, NaiveDate};
 use regex::Regex;
 use lazy_static::lazy_static;
 use std::fmt;
@@ -9,6 +9,34 @@ lazy_static! {
     static ref COMPLETED_RE: Regex = Regex::new(r"^x\s+").unwrap();
     static ref PROJECT_RE: Regex = Regex::new(r"\+(\S+)").unwrap();
     static ref CONTEXT_RE: Regex = Regex::new(r"@(\S+)").unwrap();
+    // key:value tags, e.g. `due:2026-07-01` or `rec:1w`
+    static ref TAG_RE: Regex = Regex::new(r"([^\s:]+):(\S+)").unwrap();
+    // the due: tag specifically, for in-place rewriting (\b avoids `overdue:`)
+    static ref DUE_RE: Regex = Regex::new(r"\bdue:\S+").unwrap();
+    // a recurrence spec: optional `+` (strict) then a count and a unit
+    static ref REC_RE: Regex = Regex::new(r"^(\+?)(\d+)([dwmy])$").unwrap();
+    // a `rec:` marker token, whether or not it has a valid value attached;
+    // catches `rec: +1m` (stray space) where no `rec` tag actually parses
+    static ref REC_MARKER_RE: Regex = Regex::new(r"(?:^|\s)rec:").unwrap();
+}
+
+/// Extract all `key:value` tags from a piece of text, preserving order.
+fn extract_tags(s: &str) -> Vec<(String, String)> {
+    TAG_RE
+        .captures_iter(s)
+        .filter_map(|c| Some((c.get(1)?.as_str().to_string(), c.get(2)?.as_str().to_string())))
+        .collect()
+}
+
+/// Advance `base` by `n` of `unit` (`d`/`w`/`m`/`y`). Returns None on overflow.
+fn advance_date(base: NaiveDate, n: u32, unit: char) -> Option<NaiveDate> {
+    match unit {
+        'd' => base.checked_add_signed(Duration::days(n as i64)),
+        'w' => base.checked_add_signed(Duration::weeks(n as i64)),
+        'm' => base.checked_add_months(Months::new(n)),
+        'y' => base.checked_add_months(Months::new(n * 12)),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +49,7 @@ pub struct Task {
     pub description: String,
     pub projects: Vec<String>,
     pub contexts: Vec<String>,
+    pub tags: Vec<(String, String)>,
     pub is_completed: bool,
 }
 
@@ -80,6 +109,9 @@ impl Task {
             .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
             .collect();
 
+        // Extract key:value tags
+        let tags = extract_tags(&remaining);
+
         let description = remaining.trim().to_string();
 
         Task {
@@ -91,6 +123,7 @@ impl Task {
             description,
             projects,
             contexts,
+            tags,
             is_completed,
         }
     }
@@ -111,6 +144,7 @@ impl Task {
                 .captures_iter(description)
                 .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
                 .collect(),
+            tags: extract_tags(description),
             is_completed: false,
         }
     }
@@ -118,6 +152,59 @@ impl Task {
     pub fn mark_done(&mut self) {
         self.is_completed = true;
         self.completion_date = Some(chrono::Local::now().date_naive());
+    }
+
+    /// Look up the first value for a `key:value` tag.
+    pub fn tag(&self, key: &str) -> Option<&str> {
+        self.tags.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// The task's due date, from a `due:YYYY-MM-DD` tag, if present and valid.
+    pub fn due(&self) -> Option<NaiveDate> {
+        self.tag("due")
+            .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+    }
+
+    /// The raw recurrence spec, from a `rec:` tag (e.g. `1w`, `+3m`), if present.
+    pub fn recurrence(&self) -> Option<&str> {
+        self.tag("rec")
+    }
+
+    /// True if the text contains a `rec:` marker, even one that didn't parse as
+    /// a tag — e.g. `rec: +1m`, where a stray space leaves an empty value.
+    pub fn has_recurrence_marker(&self) -> bool {
+        REC_MARKER_RE.is_match(&self.description)
+    }
+
+    /// Build the next occurrence of a recurring task, to be created when this
+    /// one is completed.
+    ///
+    /// A `rec:` spec is `<count><unit>` where unit is `d`/`w`/`m`/`y`. A leading
+    /// `+` makes it *strict*: the next due date is offset from the old due date
+    /// (so e.g. monthly rent never drifts). Without `+`, it is offset from the
+    /// completion date (`today`). A `due:` tag is required to anchor recurrence;
+    /// returns None if absent, or if the spec is malformed.
+    pub fn next_occurrence(&self, today: NaiveDate) -> Option<Task> {
+        let caps = REC_RE.captures(self.recurrence()?)?;
+        let strict = !caps.get(1)?.as_str().is_empty();
+        let n: u32 = caps.get(2)?.as_str().parse().ok()?;
+        let unit = caps.get(3)?.as_str().chars().next()?;
+
+        let due = self.due()?;
+        let base = if strict { due } else { today };
+        let next_due = advance_date(base, n, unit)?;
+
+        // Rewrite the due: tag in the description to the new date.
+        let new_desc = DUE_RE
+            .replace(&self.description, format!("due:{}", next_due.format("%Y-%m-%d")))
+            .to_string();
+
+        // Carry over the original creation date (if any) rather than stamping
+        // the completion date onto the new occurrence.
+        let mut next = Task::new(&new_desc);
+        next.priority = self.priority;
+        next.creation_date = self.creation_date;
+        Some(next)
     }
 
     pub fn has_project(&self, project: &str) -> bool {
@@ -196,6 +283,81 @@ mod tests {
         assert!(task.has_project("urgent"));
         assert!(task.has_context("phone"));
         assert!(task.has_context("home"));
+    }
+
+    fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn test_parse_tags() {
+        let task = Task::parse(1, "Pay rent due:2026-07-01 rec:1m");
+        assert_eq!(task.due(), Some(ymd(2026, 7, 1)));
+        assert_eq!(task.recurrence(), Some("1m"));
+        assert_eq!(task.tag("rec"), Some("1m"));
+        assert_eq!(task.description, "Pay rent due:2026-07-01 rec:1m");
+    }
+
+    #[test]
+    fn test_next_occurrence_strict_uses_due_date() {
+        // strict (+) recurs from the old due date, regardless of completion day
+        let task = Task::parse(1, "(A) Pay rent due:2020-01-15 rec:+1m");
+        let next = task.next_occurrence(ymd(2020, 1, 20)).unwrap();
+        assert_eq!(next.due(), Some(ymd(2020, 2, 15)));
+        assert_eq!(next.priority, Some('A'));
+        assert!(!next.is_completed);
+        // no creation date was on the original, so none is added
+        assert_eq!(next.creation_date, None);
+    }
+
+    #[test]
+    fn test_next_occurrence_non_strict_uses_completion_date() {
+        // non-strict recurs from the completion date (today)
+        let task = Task::parse(1, "Water plants due:2020-01-15 rec:3d");
+        let next = task.next_occurrence(ymd(2020, 1, 20)).unwrap();
+        assert_eq!(next.due(), Some(ymd(2020, 1, 23)));
+    }
+
+    #[test]
+    fn test_next_occurrence_carries_creation_date() {
+        // an existing creation date is preserved, not replaced by completion date
+        let task = Task::parse(1, "2020-01-01 Water plants due:2020-01-15 rec:+3d");
+        let next = task.next_occurrence(ymd(2020, 1, 20)).unwrap();
+        assert_eq!(next.creation_date, Some(ymd(2020, 1, 1)));
+    }
+
+    #[test]
+    fn test_has_recurrence_marker() {
+        // stray space: no rec tag parses, but the marker is still detectable
+        let task = Task::parse(1, "Pay rent due:2020-01-15 rec: +1m");
+        assert!(task.recurrence().is_none());
+        assert!(task.has_recurrence_marker());
+        // a clean task has no marker
+        assert!(!Task::parse(1, "Pay rent due:2020-01-15").has_recurrence_marker());
+    }
+
+    #[test]
+    fn test_next_occurrence_units() {
+        let mk = |spec: &str| {
+            Task::parse(1, &format!("T due:2020-01-15 rec:+{}", spec))
+                .next_occurrence(ymd(2020, 6, 1))
+                .unwrap()
+                .due()
+                .unwrap()
+        };
+        assert_eq!(mk("2d"), ymd(2020, 1, 17));
+        assert_eq!(mk("2w"), ymd(2020, 1, 29));
+        assert_eq!(mk("1y"), ymd(2021, 1, 15));
+    }
+
+    #[test]
+    fn test_no_recurrence_without_rec_or_due() {
+        // rec without due cannot be anchored
+        assert!(Task::parse(1, "Task rec:1w").next_occurrence(ymd(2020, 1, 1)).is_none());
+        // no rec at all
+        assert!(Task::parse(1, "Task due:2020-01-01").next_occurrence(ymd(2020, 1, 1)).is_none());
+        // malformed spec
+        assert!(Task::parse(1, "Task due:2020-01-01 rec:soon").next_occurrence(ymd(2020, 1, 1)).is_none());
     }
 
     #[test]
